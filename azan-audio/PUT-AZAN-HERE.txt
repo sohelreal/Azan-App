@@ -1,0 +1,4 @@
+Put your full Azan recording in this folder, named exactly:
+  azan.mp3         (required - plays for all prayers)
+  azan-fajr.mp3    (optional - plays for Fajr instead)
+Use a recording you have the right to use. MP3, ideally under 5 MB.

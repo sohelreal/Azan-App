@@ -11,16 +11,65 @@ jobs:
         with: { node-version: 20 }
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
-      - run: npm install
-      - run: npx cap add android
-      - name: Add permissions
+      - run: npm install --legacy-peer-deps
+      - name: Add Azan audio
         run: |
+          echo "Audio files found in repository:"
+          find . -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.ogg' -o -iname '*.aac' \) -not -path './node_modules/*' -not -path './www/*' -not -path './android/*' -print
+          FAJR=$(find . -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.ogg' -o -iname '*.aac' \) -iname '*fajr*' -not -path './node_modules/*' -not -path './www/*' -not -path './android/*' | head -1)
+          MAIN=$(find . -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.ogg' -o -iname '*.aac' \) -not -iname '*fajr*' -not -path './node_modules/*' -not -path './www/*' -not -path './android/*' | head -1)
+          [ -z "$MAIN" ] && MAIN="$FAJR"
+          conv() { if command -v ffmpeg >/dev/null; then ffmpeg -y -loglevel error -i "$1" -vn -codec:a libmp3lame -q:a 4 "$2" || cp "$1" "$2"; else cp "$1" "$2"; fi; }
+          if [ -n "$MAIN" ]; then echo "Main Azan: $MAIN"; conv "$MAIN" www/azan.mp3; else echo "WARNING - no audio file found"; fi
+          if [ -n "$FAJR" ]; then echo "Fajr Azan: $FAJR"; conv "$FAJR" www/azan-fajr.mp3; fi
+          ls -la www
+      - run: npx cap add android
+      - name: Android audio, permissions
+        run: |
+          RAW=android/app/src/main/res/raw
+          mkdir -p $RAW
+          [ -f www/azan.mp3 ] && cp www/azan.mp3 $RAW/azan.mp3 || true
+          [ -f www/azan-fajr.mp3 ] && cp www/azan-fajr.mp3 $RAW/azan_fajr.mp3 || true
           M=android/app/src/main/AndroidManifest.xml
-          sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />#' $M
-          grep -c ACCESS_FINE_LOCATION $M
+          sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />#' $M
+          sed -i 's#</manifest>#    <queries><intent><action android:name="android.intent.action.TTS_SERVICE" /></intent></queries>\n</manifest>#' $M
+          grep -c "FOREGROUND_SERVICE_MEDIA_PLAYBACK" $M
       - run: npx cap sync android
-      - run: cd android && chmod +x gradlew && ./gradlew assembleDebug
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > $GITHUB_WORKSPACE/azan.jks
+            echo "KSPASS=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
+            echo "Using your permanent signing key."
+          else
+            keytool -genkeypair -keystore $GITHUB_WORKSPACE/azan.jks -alias azan -keyalg RSA -keysize 2048 -validity 10000 -storepass azantemp123 -keypass azantemp123 -dname "CN=Azan App, O=Azan, C=CA"
+            echo "KSPASS=azantemp123" >> $GITHUB_ENV
+            echo "WARNING - no permanent key found. This APK is signed with a temporary key, so future updates will not install over it. Run 'Create signing key' once (see README)."
+          fi
+      - name: Build release APK and AAB
+        run: cd android && chmod +x gradlew && ./gradlew assembleRelease bundleRelease
+      - name: Sign
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          OUT=$GITHUB_WORKSPACE/signed; mkdir -p $OUT
+          cd android/app/build/outputs/apk/release
+          $BT/zipalign -p -f 4 app-release-unsigned.apk $OUT/aligned.apk
+          $BT/apksigner sign --ks $GITHUB_WORKSPACE/azan.jks --ks-alias azan --ks-pass env:KSPASS --key-pass env:KSPASS --out $OUT/Azan.apk $OUT/aligned.apk
+          rm $OUT/aligned.apk
+          $BT/apksigner verify --print-certs $OUT/Azan.apk | head -5
+          cd $GITHUB_WORKSPACE/android/app/build/outputs/bundle/release
+          jarsigner -keystore $GITHUB_WORKSPACE/azan.jks -storepass "$KSPASS" -keypass "$KSPASS" -sigalg SHA256withRSA -digestalg SHA-256 app-release.aab azan
+          cp app-release.aab $OUT/Azan.aab
+          echo "Certificate fingerprint (needed for Google developer verification):"
+          keytool -list -v -keystore $GITHUB_WORKSPACE/azan.jks -storepass "$KSPASS" | grep -E "SHA256|SHA1"
       - uses: actions/upload-artifact@v4
         with:
           name: azan-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: signed/Azan.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azan-aab-for-play-store
+          path: signed/Azan.aab

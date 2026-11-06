@@ -1,0 +1,25 @@
+name: Create signing key (run once)
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: "Choose a password (letters and numbers, at least 8 characters). Remember it."
+        required: true
+jobs:
+  make:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create key
+        env:
+          PW: ${{ inputs.password }}
+        run: |
+          keytool -genkeypair -keystore azan.jks -alias azan -keyalg RSA -keysize 2048 -validity 10000 -storepass "$PW" -keypass "$PW" -dname "CN=Azan App, O=Azan, C=CA"
+          {
+            echo "## Add these two GitHub secrets, then DELETE this workflow run"
+            echo "1. KEYSTORE_PASSWORD = the password you typed"
+            echo "2. KEYSTORE_BASE64 = the text between the lines below"
+            echo '```'
+            base64 -w0 azan.jks
+            echo
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
